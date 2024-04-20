@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "ai-consultant"
+version = "0.1.0"
+description = ""
+authors = ["Brian Taylor <brian.taylor@optimizely.com>"]
+readme = "README.md"
+packages = [{include = "ai_consultant"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+google-cloud-aiplatform = "^1.48.0"
+pydantic = "^2.7.0"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.1.1"
+pytest-asyncio = "^0.23.6"
+ipython = "^8.23.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# python_paths = "."
+asyncio_mode="auto"
