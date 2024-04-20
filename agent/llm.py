@@ -26,7 +26,7 @@ safety_settings = {
 }
 
 
-def write_file(path: str, content: str, base: str='.'):
+def write_file(path: str, content: str, base):
     """write content to a file"""
     path = os.path.join(base, path)
     basepath, _ = os.path.split(path)
@@ -36,14 +36,14 @@ def write_file(path: str, content: str, base: str='.'):
         file.write(content)
 
 
-def cat_file(path, base='.'):
+def cat_file(path, base):
     """read a file's content"""
     path = os.path.join(base, path)
     with open(path) as file:
         return file.read()
 
 
-def cat_files_of_type(suffix, base='.'):
+def cat_files_of_type(suffix, base):
     """read all files with a given suffix"""
     result = ""
     for root, _, files in os.walk(base):
@@ -66,7 +66,7 @@ def file_metadata(path: str) -> str:
         return "binary"
 
 
-def ls_tree(base='.'):
+def ls_tree(base: str):
     """recursively depict the directory hierarchy as an outline
     including line counts for all files"""
     result = ""
@@ -80,12 +80,13 @@ def ls_tree(base='.'):
     return result
 
 
-def invoke_tool(name, *, fn: typing.Callable, args: dict):
+def invoke_tool(name, *, fn: typing.Callable, args: dict, base: str):
     """invoke a tool function with the given arguments"""
+    print(f"invoking {name} with {args}")
     try:
         return Part.from_function_response(
             name,
-            {"content": fn(**args)}
+            {"content": fn(**args, base=base)}
         )
     except Exception as exc:
         return Part.from_function_response(
@@ -93,10 +94,15 @@ def invoke_tool(name, *, fn: typing.Callable, args: dict):
             {"error": str(exc)}
         )
 
-class StatefulChat:
-    chat: ChatSession
 
-    def __init__(self, system_prompt: str):
+class StatefulChat:
+    """a chat session with a generative model that can invoke tools"""
+    chat: ChatSession
+    base_path: str
+
+    def __init__(self, system_prompt: str, base_path: str):
+        self.base_path = base_path
+
         write_file_tool = FunctionDeclaration(
             name="write_file",
             description="fully replace the contents of a file in the project",
@@ -175,24 +181,30 @@ class StatefulChat:
                         response = invoke_tool("write_file",
                                                fn=write_file,
                                                args={"path": tool.args["path"],
-                                                     "content": tool.args["content"]})
+                                                     "content": tool.args["content"]},
+                                               base=self.base_path)
                         followups.append(lambda: self.chat.send_message_async(response, stream=True))
                     elif tool.name == "cat_file":
                         response = invoke_tool("cat_file",
                                                fn=cat_file,
-                                               args={"path": tool.args["path"]})
+                                               args={"path": tool.args["path"]},
+                                               base=self.base_path)
                         followups.append(lambda: self.chat.send_message_async(response, stream=True))
                     elif tool.name == "cat_files_of_type":
                         response = invoke_tool("cat_files_of_type",
                                                fn=cat_files_of_type,
-                                               args={"suffix": tool.args["suffix"]})
+                                               args={"suffix": tool.args["suffix"]},
+                                               base=self.base_path)
                         followups.append(lambda: self.chat.send_message_async(response, stream=True))
                     elif tool.name == "ls_tree":
                         response = invoke_tool("ls_tree",
                                                fn=ls_tree,
-                                               args={})
-                        # print(response)
-                        followups.append(lambda: self.chat.send_message_async(response, stream=True))
+                                               args={},
+                                               base=self.base_path)
+                    else:
+                        raise ValueError(f"unknown tool {tool.name}")
+                    print(response)
+                    followups.append(lambda: self.chat.send_message_async(response, stream=True))
                 
                 if not candidate.function_calls:
                     yield candidate.text
@@ -202,7 +214,7 @@ async def main():
     """main function"""
     import sys
     chat = StatefulChat("")
-    async for chunk in chat.interact("please create unit tests for agent/llm.py"):
+    async for chunk in chat.interact("please use the provided tools to carefully analyze agent/llm.py and create complete and functional unit tests for it in the tests/agent directory"):
         sys.stdout.write(chunk)
         sys.stdout.flush()
 

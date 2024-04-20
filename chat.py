@@ -9,7 +9,7 @@ import re
 import agent.llm as llm
 from agent.detector import Detector
 
-async def main():
+async def main2():
     """main function"""
     args = argparse.ArgumentParser()
     args.add_argument("outdir")
@@ -64,6 +64,29 @@ async def main():
             sys.stdout.write(chunk)
             sys.stdout.flush()
         transcript.append({"role": "consultant", "content": completion})
+
+
+async def main():
+    """main function"""
+    args = argparse.ArgumentParser()
+    args.add_argument("outdir")
+    args.add_argument("--prompt", default="consultant.prompt")
+    args = args.parse_args()
+
+    if not os.path.exists(args.outdir):
+        os.makedirs(args.outdir)
+    
+    chat = llm.StatefulChat(
+        system_prompt=open(args.prompt).read(),
+        base_path=args.outdir,
+    )
+    while True:
+        prompt = input("> ")
+        if not prompt:
+            break
+        async for chunk in chat.interact(prompt):
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
 
 if __name__ == '__main__':
     asyncio.run(main())
