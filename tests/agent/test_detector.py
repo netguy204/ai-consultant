@@ -1,3 +1,5 @@
+import re
+
 from agent.detector import Detector
 
 
@@ -82,7 +84,8 @@ Certainly, I'd love to help you with that.
 
 Here's the code for your specification.
 
-```pyproject.toml
+#### pyproject.toml
+```toml
 [tool.poetry]
 name = "my-project"
 version = "0.1.0"
@@ -91,12 +94,14 @@ description = "My project description"
 
 and here's the code for your main.py file.
 
-```main.py
+#### main.py
+```python
 print("Hello, world!")
 ```
 
 I hope that helps
 """
+
 
 async def test_detector_example():
     """prove that a code block detector can successfully
@@ -104,19 +109,16 @@ async def test_detector_example():
     how its split into chunks"""
 
     matches = []
+    # should capture code blocks between ``` markers while ignoring the
+    # language tag after the first marker
+    matcher = re.compile(r"```.*?\n(.*?)```", re.DOTALL)
 
     def on_wake(suffix):
-        """on wake"""
-        if not matches:
-            # start the first match
-            matches.append('')
-        if "```" in suffix:
-            before, _, _ = suffix.partition("```")
-            matches[-1] = before
-            # start the next match
-            matches.append('')
+        """extract the code between the ``` markers and add it to matches"""
+        match = matcher.search(suffix)
+        if match:
+            matches.append(match.group(1))
             return False
-        matches[-1] = suffix
         return True
 
     for chunk_size in range(2, 10):
@@ -129,17 +131,16 @@ async def test_detector_example():
 
         detector = Detector(
             demo_stream(partitioning),
-            "```",
+            "####",
             on_wake,
         )
 
         complete = ""
         async for item in detector:
             complete += item
-        
+        print(matches)
         assert complete == example_output
         assert matches == [
-            "pyproject.toml\n[tool.poetry]\nname = \"my-project\"\nversion = \"0.1.0\"\ndescription = \"My project description\"\n",
-            "main.py\nprint(\"Hello, world!\")\n",
-            ""
+            "[tool.poetry]\nname = \"my-project\"\nversion = \"0.1.0\"\ndescription = \"My project description\"\n",
+            "print(\"Hello, world!\")\n"
         ]
