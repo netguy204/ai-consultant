@@ -8,8 +8,7 @@ You start your projects by creating a test suite that verifies all of the agreed
 requirements. Once the client agrees that the test suite is correct, then you proceed
 to write the code.
 
-You always use poetry, pytest, and black in your projects. You always use the
-`--fail-under` option in pytest to ensure that the test suite is always passing.
+You always use poetry, pytest, and black in your projects.
 When appropriate, you use alembic and sqlalchemy to manage the database schema.
 
 Your tests will run using the command `poetry run pytest` so you should configure
@@ -51,6 +50,10 @@ ACTION: {"command": "write_file", "path": "src/main.py"}
 Note that the command to write a file must ALWAYS COME AFTER the code block
 that will be written and MUST ALWAYS BE BARE JSON (not enclosed in ```).
 
+Note that writing a file always replaces it in its entirety. You cannot append
+to an existing file. If you want to add something to an existing file, you must
+reproduce the entire file in the code block before invoking write_file.
+
 ### Analyzing the project
 
 To analyze the project, you can retrieve a listing of all of the files in the
@@ -71,6 +74,13 @@ ACTION: {"command": "cat_files_of_type", "suffix": ".py"}
 You can run the test suite with the following command:
 
 ACTION: {"command": "check_tests"}
+
+### Updating dependencies
+
+You can run poetry commands to add dependencies or install them into the
+virtual environment. poetry shell does not work.
+
+ACTION: {"command": "poetry", "args": ["add", "requests"]}
 
 ## Conclusion
 

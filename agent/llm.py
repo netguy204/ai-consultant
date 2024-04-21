@@ -4,29 +4,10 @@ import typing
 import json
 import re
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part, Tool, FunctionDeclaration, ChatSession
-import vertexai.preview.generative_models as generative_models
+import anthropic
+import dotenv
+
 from . import detector
-
-PROJECT_ID = "expeng-k8s-prototype"
-LOCATION = "us-central1"
-vertexai.init(project=PROJECT_ID, location=LOCATION)
-
-
-generation_config = {
-    "max_output_tokens": 8192,
-    "temperature": 1,
-    "top_p": 0.95,
-}
-
-safety_settings = {
-    generative_models.HarmCategory.HARM_CATEGORY_HATE_SPEECH: generative_models.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    generative_models.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: generative_models.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    generative_models.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: generative_models.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    generative_models.HarmCategory.HARM_CATEGORY_HARASSMENT: generative_models.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-}
-
 
 def write_file(path: str, content: str, base):
     """write content to a file"""
@@ -85,12 +66,53 @@ def ls_tree(base: str):
 def run_tests(base: str) -> str:
     """run tests in the tests/ directory"""
     import subprocess
-    result = subprocess.run(["pytest", "tests"],
+    result = subprocess.run(["poetry", "run", "pytest"],
                             cwd=base,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode == 0:
         return "all tests passed"
-    return f"pytests failed with {result.returncode}: {result.stderr.decode()}"
+    return f"pytests failed with {result.returncode}: {result.stderr.decode() + result.stdout.decode()}"
+
+def run_poetry(args: list[str], base: str) -> str:
+    """run a poetry command"""
+    import subprocess
+    result = subprocess.run(["poetry", *args],
+                            cwd=base,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 0:
+        return result.stdout.decode()
+    return f"poetry failed with {result.returncode}: {result.stderr.decode() + result.stdout.decode()}"
+
+class ChatSession:
+    transcript: list[dict]
+    client: anthropic.Anthropic
+    system: str
+    base: str
+
+    def __init__(self, client: anthropic.Anthropic, system: str, base: str):
+        self.transcript = []
+        self.system = system
+        self.client = client
+        self.base = base
+
+    async def send_message_async(self, message: str) -> typing.AsyncGenerator[str, None]:
+        """send a message to the model and yield the response
+        as it comes in"""
+        self.transcript.append({"role": "user", "content": message})
+        with self.client.messages.stream(
+            model="claude-3-opus-20240229",
+            max_tokens=4096,
+            messages=self.transcript,
+            system=self.system,
+        ) as stream:
+            completion = ""
+            for text in stream.text_stream:
+                completion += text
+                yield text
+        self.transcript.append({"role": "assistant", "content": completion})
+        with open(os.path.join(self.base, "transcript.json"), "w") as file:
+            json.dump(self.transcript, file)
+
 
 class StatefulChat:
     """a chat session with a generative model that can invoke tools"""
@@ -99,20 +121,14 @@ class StatefulChat:
 
     def __init__(self, system_prompt: str, base_path: str):
         self.base_path = base_path
-
-        model = GenerativeModel(
-            "gemini-1.5-pro-preview-0409",
-            # "gemini-experimental",
-            # "gemini-1.0-pro-vision-001",
-            system_instruction=system_prompt,
-            safety_settings=safety_settings,
-        )
-        self.chat = model.start_chat()
+        dotenv.load_dotenv()
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.chat = ChatSession(client, system_prompt, self.base_path)
     
     def evaluate_tools(self, message: str) -> str|None:
         """evaluate any tools in the message and return the result"""
         parser = detector.JSONMDParser()
-        pathish = re.compile(r"([\w/]+\.\w+)")
+        # pathish = re.compile(r"([\w/]+\.\w+)")
         
         active_code_block = None
 
@@ -127,7 +143,9 @@ class StatefulChat:
             "cat_files_of_type": lambda **args: cat_files_of_type(**args, base=self.base_path),
             "ls_tree": lambda **args: ls_tree(**args, base=self.base_path),
             "check_tests": lambda **args: run_tests(**args, base=self.base_path),
+            "poetry": lambda **args: run_poetry(**args, base=self.base_path),
         }
+
         observations = []
         for element in parser.scan(message):
             if isinstance(element, detector.CodeBlock):
@@ -146,12 +164,12 @@ class StatefulChat:
                         # gemini also insists on skipping write_file and
                         # putting the file name at the beginning of the code block
                         # so try to accomodate that
-                        first_line = element.code.split("\n")[0]
-                        match = pathish.match(first_line)
-                        if match:
-                            write_file(path=match.group(1), content=element.code, base=self.base_path)
-                        else:
-                            active_code_block = element
+                        # first_line = element.code.split("\n")[0]
+                        # match = pathish.match(first_line)
+                        # if match:
+                        #     write_file(path=match.group(1), content=element.code, base=self.base_path)
+                        # else:
+                        active_code_block = element
 
             if not isinstance(element, dict):
                 continue
@@ -182,18 +200,18 @@ class StatefulChat:
     async def interact(self, prompt: str) -> typing.Generator[str,str,None]:
         """send the next interaction to the model and yield the response.
         automatically invoke any tools and reprompt as necessary"""
-        followups = [lambda: self.chat.send_message_async(prompt, stream=True)]
+        followups = [lambda: self.chat.send_message_async(prompt)]
         
         while followups:
-            responses = await (followups.pop(0)())
+            responses = followups.pop(0)()
             full_completion = ""
-            async for response in responses:
-                candidate = response.candidates[0]
-                full_completion += candidate.text
-                yield candidate.text
+            async for text in responses:
+                full_completion += text
+                yield text
+            yield "\n"
             tool_output = self.evaluate_tools(full_completion)
             if tool_output:
-                followups.append(lambda: self.chat.send_message_async(tool_output, stream=True))
+                followups.append(lambda: self.chat.send_message_async(tool_output))
 
 
 async def main():
