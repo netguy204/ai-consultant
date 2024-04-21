@@ -1,11 +1,13 @@
 """provide completions via vertex ai"""
 import os
 import typing
+import json
+import re
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part, Tool, FunctionDeclaration, ChatSession
 import vertexai.preview.generative_models as generative_models
-
+from . import detector
 
 PROJECT_ID = "expeng-k8s-prototype"
 LOCATION = "us-central1"
@@ -80,20 +82,15 @@ def ls_tree(base: str):
     return result
 
 
-def invoke_tool(name, *, fn: typing.Callable, args: dict, base: str):
-    """invoke a tool function with the given arguments"""
-    print(f"invoking {name} with {args}")
-    try:
-        return Part.from_function_response(
-            name,
-            {"content": fn(**args, base=base)}
-        )
-    except Exception as exc:
-        return Part.from_function_response(
-            name,
-            {"error": str(exc)}
-        )
-
+def run_tests(base: str) -> str:
+    """run tests in the tests/ directory"""
+    import subprocess
+    result = subprocess.run(["pytest", "tests"],
+                            cwd=base,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 0:
+        return "all tests passed"
+    return f"pytests failed with {result.returncode}: {result.stderr.decode()}"
 
 class StatefulChat:
     """a chat session with a generative model that can invoke tools"""
@@ -103,111 +100,100 @@ class StatefulChat:
     def __init__(self, system_prompt: str, base_path: str):
         self.base_path = base_path
 
-        write_file_tool = FunctionDeclaration(
-            name="write_file",
-            description="fully replace the contents of a file in the project",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "the path to the file to replace inside the project"
-                    }, "content": {
-                        "type": "string",
-                        "description": "the entire new contents for the file"
-                    }
-                },
-                "required": ["path", "content"]
-            },
-        )
-        cat_file_tool = FunctionDeclaration(
-            name="cat_file",
-            description="read the contents of a file in the project",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "the path to the file to read inside the project"
-                    }
-                },
-                "required": ["path"]
-            },
-        )
-        cat_files_of_type_tool = FunctionDeclaration(
-            name="cat_files_of_type",
-            description="read all files with a given suffix",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "suffix": {
-                        "type": "string",
-                        "description": "the suffix of the files to read inside the project"
-                    }
-                },
-                "required": ["suffix"]
-            },
-        )
-        ls_tree_tool = FunctionDeclaration(
-            name="ls_tree",
-            description="recursively depict the directory hierarchy as an outline",
-            parameters={
-                "type": "object",
-                "properties": {},
-            },
-        )
-        tools = [write_file_tool, cat_file_tool, cat_files_of_type_tool,
-                 ls_tree_tool]
-        project_tools = Tool(function_declarations=tools)
         model = GenerativeModel(
             "gemini-1.5-pro-preview-0409",
-            tools=[project_tools],
+            # "gemini-experimental",
+            # "gemini-1.0-pro-vision-001",
             system_instruction=system_prompt,
             safety_settings=safety_settings,
         )
         self.chat = model.start_chat()
+    
+    def evaluate_tools(self, message: str) -> str|None:
+        """evaluate any tools in the message and return the result"""
+        parser = detector.JSONMDParser()
+        pathish = re.compile(r"([\w/]+\.\w+)")
+        
+        active_code_block = None
+
+        def inner_write_file(**args):
+            if active_code_block is None:
+                raise ValueError("there was code block immediately before this write_file command. I should try emitting the code block and then the write_file command")
+            return write_file(**args, content=active_code_block.code)
+        
+        tools = {
+            "write_file": lambda **args: inner_write_file(**args, base=self.base_path),
+            "cat_file": lambda **args: cat_file(**args, base=self.base_path),
+            "cat_files_of_type": lambda **args: cat_files_of_type(**args, base=self.base_path),
+            "ls_tree": lambda **args: ls_tree(**args, base=self.base_path),
+            "check_tests": lambda **args: run_tests(**args, base=self.base_path),
+        }
+        observations = []
+        for element in parser.scan(message):
+            if isinstance(element, detector.CodeBlock):
+                if element.language == 'json':
+                    # gemini can't be trusted to not put commands in
+                    # code blocks blocks, so we'll parse them here
+                    try:
+                        element = json.loads(element.code)
+                    except json.JSONDecodeError as exc:
+                        observations.append(f"{element.code}: failed to parse as json: {exc}")
+                        continue
+                else:
+                    if active_code_block is not None:
+                        active_code_block.code += element.code
+                    else:
+                        # gemini also insists on skipping write_file and
+                        # putting the file name at the beginning of the code block
+                        # so try to accomodate that
+                        first_line = element.code.split("\n")[0]
+                        match = pathish.match(first_line)
+                        if match:
+                            write_file(path=match.group(1), content=element.code, base=self.base_path)
+                        else:
+                            active_code_block = element
+
+            if not isinstance(element, dict):
+                continue
+
+            if "command" not in element:
+                observations.append(json.dumps(element) + " is bare json without a command key")
+                continue
+
+            name = element["command"]
+            element.pop("command")
+            if name not in tools:
+                observations.append(f"unknown tool {name}")
+                continue
+
+            try:
+                result = tools[name](**element)
+                observations.append(f"invoked {name} with {element} and got {result}")
+                active_code_block = None
+            except Exception as exc:
+                observations.append(f"failed to invoke {name} with {element}: {exc}")
+        
+        if active_code_block is not None:
+            observations.append("the final code block was not folloed by a write_file command")
+
+        return "\n".join(f"OBSERVATION: {obs}\n" for obs in observations)
+
 
     async def interact(self, prompt: str) -> typing.Generator[str,str,None]:
         """send the next interaction to the model and yield the response.
         automatically invoke any tools and reprompt as necessary"""
         followups = [lambda: self.chat.send_message_async(prompt, stream=True)]
+        
         while followups:
             responses = await (followups.pop(0)())
+            full_completion = ""
             async for response in responses:
-                # print(response)
                 candidate = response.candidates[0]
-                for tool in candidate.function_calls:
-                    if tool.name == "write_file":
-                        response = invoke_tool("write_file",
-                                               fn=write_file,
-                                               args={"path": tool.args["path"],
-                                                     "content": tool.args["content"]},
-                                               base=self.base_path)
-                        followups.append(lambda: self.chat.send_message_async(response, stream=True))
-                    elif tool.name == "cat_file":
-                        response = invoke_tool("cat_file",
-                                               fn=cat_file,
-                                               args={"path": tool.args["path"]},
-                                               base=self.base_path)
-                        followups.append(lambda: self.chat.send_message_async(response, stream=True))
-                    elif tool.name == "cat_files_of_type":
-                        response = invoke_tool("cat_files_of_type",
-                                               fn=cat_files_of_type,
-                                               args={"suffix": tool.args["suffix"]},
-                                               base=self.base_path)
-                        followups.append(lambda: self.chat.send_message_async(response, stream=True))
-                    elif tool.name == "ls_tree":
-                        response = invoke_tool("ls_tree",
-                                               fn=ls_tree,
-                                               args={},
-                                               base=self.base_path)
-                    else:
-                        raise ValueError(f"unknown tool {tool.name}")
-                    print(response)
-                    followups.append(lambda: self.chat.send_message_async(response, stream=True))
-                
-                if not candidate.function_calls:
-                    yield candidate.text
+                full_completion += candidate.text
+                yield candidate.text
+            tool_output = self.evaluate_tools(full_completion)
+            if tool_output:
+                followups.append(lambda: self.chat.send_message_async(tool_output, stream=True))
 
 
 async def main():

@@ -1,6 +1,6 @@
 import re
 
-from agent.detector import Detector
+from agent.detector import Detector, JSONMDParser, Tokenizer, CodeBlock
 
 
 async def demo_stream(seq):
@@ -144,3 +144,78 @@ async def test_detector_example():
             "[tool.poetry]\nname = \"my-project\"\nversion = \"0.1.0\"\ndescription = \"My project description\"\n",
             "print(\"Hello, world!\")\n"
         ]
+
+
+def test_parse_string():
+    """we can extract a string if we're looking at one"""
+    parser = JSONMDParser()
+    assert parser.consume_string(Tokenizer('"hello"')) == "hello"
+    assert parser.consume_string(Tokenizer('"hello" 123')) == "hello"
+    assert parser.consume_string(Tokenizer('123 "hello"')) is None
+    assert parser.consume_string(Tokenizer('"\\\"hello\\\""')) == "\"hello\""
+
+
+def test_parse_number():
+    """we can extract a number if we're looking at one"""
+    parser = JSONMDParser()
+    assert parser.consume_number(Tokenizer("123")) == 123
+    assert parser.consume_number(Tokenizer("123.45")) == 123.45
+    assert parser.consume_number(Tokenizer("123e4")) == 123e4
+    assert parser.consume_number(Tokenizer("123e-4")) == 123e-4
+    assert parser.consume_number(Tokenizer("123 abc")) == 123
+    assert parser.consume_number(Tokenizer("123.45.")) == 123.45
+
+
+def test_parse_object():
+    """we can extract any fully valid json object we are looking at"""
+    parser = JSONMDParser()
+    assert parser.consume_object(Tokenizer("{}")) == {}
+    assert parser.consume_object(Tokenizer('{')) is None
+    assert parser.consume_object(Tokenizer('{"foo": 1')) is None
+    assert parser.consume_object(Tokenizer('{"a": 1}')) == {"a": 1}
+    assert parser.consume_object(Tokenizer('{"a": 1}}12')) == {"a": 1}
+    assert parser.consume_object(Tokenizer('{"a": 1, "b": "hello"}')) == {"a": 1, "b": "hello"}
+    assert parser.consume_object(Tokenizer('{"a": 1, }')) is None
+
+
+def test_parse_array():
+    """we can extract any fully valid array we are looking at"""
+    parser = JSONMDParser()
+    assert parser.consume_array(Tokenizer("[]")) == []
+    assert parser.consume_array(Tokenizer("[")) is None
+    assert parser.consume_array(Tokenizer("[1")) is None
+    assert parser.consume_array(Tokenizer("[1]")) == [1]
+    assert parser.consume_array(Tokenizer("[1, 2]")) == [1, 2]
+    assert parser.consume_array(Tokenizer("[1, 2,]")) is None
+    assert parser.consume_array(Tokenizer('[1, 2, "3"]')) == [1, 2, "3"]
+
+
+def test_complex():
+    """we can extract a complex json object"""
+    parser = JSONMDParser()
+    assert parser.parse('{"a": 1, "b": [1, 2, 3], "c": {"d": "hello"}}') == {"a": 1, "b": [1, 2, 3], "c": {"d": "hello"}}
+    assert parser.parse('{"a": 1, "b": [1, 2, 3], "c": {"d": "hello"}') is None
+    assert parser.parse('{"a": 1, "b": [1, 2, 3], "c": {"d": "hello"') is None
+    assert parser.parse('[{"key": "foo"}]') == [{"key": "foo"}]
+    assert parser.parse('[{"key": "foo"}') is None
+
+
+def test_scan():
+    doc = """
+    I've been thinking about ones
+    {"a": 1}
+    And occasionally twos
+    {"b": 2}
+
+    But never threes
+    {"c": 3}
+
+    But here's a 4.
+
+```javascript
+console.log("and some code")
+```
+    """
+
+    parser = JSONMDParser()
+    assert list(parser.scan(doc)) == [{"a": 1}, {"b": 2}, {"c": 3}, 4, CodeBlock(language="javascript", code='console.log("and some code")\n')]
