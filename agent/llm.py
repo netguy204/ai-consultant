@@ -186,7 +186,8 @@ class StatefulChat:
 
             try:
                 result = tools[name](**element)
-                observations.append(f"invoked {name} with {element} and got {result}")
+                if result is not None:
+                    observations.append(f"invoked {name} with {element} and got {result}")
                 active_code_block = None
             except Exception as exc:
                 observations.append(f"failed to invoke {name} with {element}: {exc}")
