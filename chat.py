@@ -5,6 +5,7 @@ import asyncio
 import argparse
 import os
 import re
+import shutil
 
 import agent.llm as llm
 from agent.detector import Detector
@@ -74,7 +75,7 @@ async def main():
     args = args.parse_args()
 
     if not os.path.exists(args.outdir):
-        os.makedirs(args.outdir)
+        shutil.copytree('isolation_env/python/template/', args.outdir)
     
     chat = llm.StatefulChat(
         system_prompt=open(args.prompt).read(),

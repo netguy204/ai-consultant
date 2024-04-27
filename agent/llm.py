@@ -2,86 +2,14 @@
 import os
 import typing
 import json
-import re
+import difflib
 
 import anthropic
 import dotenv
 
 from . import detector
+from . import shell
 
-def write_file(path: str, content: str, base):
-    """write content to a file"""
-    path = os.path.join(base, path)
-    basepath, _ = os.path.split(path)
-    if basepath and not os.path.exists(basepath):
-        os.makedirs(basepath)
-    with open(path, "w") as file:
-        file.write(content)
-
-
-def cat_file(path, base):
-    """read a file's content"""
-    path = os.path.join(base, path)
-    with open(path) as file:
-        return file.read()
-
-
-def cat_files_of_type(suffix, base):
-    """read all files with a given suffix"""
-    result = ""
-    for root, _, files in os.walk(base):
-        for file in files:
-            if file.endswith(suffix):
-                rel_path = os.path.relpath(os.path.join(root, file), base)
-                result += f"#### {rel_path}\n"
-                result += "```\n"
-                result += cat_file(rel_path, base)
-                result += "\n```\n\n"
-    return result
-
-
-def file_metadata(path: str) -> str:
-    """returns the line count if the file is text, binary otherwise"""
-    try:
-        with open(path) as file:
-            return f"{len(file.readlines())} lines"
-    except UnicodeDecodeError:
-        return "binary"
-
-
-def ls_tree(base: str):
-    """recursively depict the directory hierarchy as an outline
-    including line counts for all files"""
-    result = ""
-    for root, _, files in os.walk(base):
-        rel_path = os.path.relpath(root, base)
-        result += f"### {rel_path}\n"
-        for file in files:
-            full_path = os.path.join(root, file)
-            result += f"* {file} ({file_metadata(full_path)})\n"
-        result += "\n"
-    return result
-
-
-def run_tests(base: str) -> str:
-    """run tests in the tests/ directory"""
-    import subprocess
-    result = subprocess.run(["poetry", "run", "pytest"],
-                            cwd=base,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode == 0:
-        return "all tests passed"
-    return f"pytests failed with {result.returncode}: {result.stderr.decode() + result.stdout.decode()}"
-
-def run_poetry(args: list[str], base: str) -> str:
-    """run a poetry command"""
-    import subprocess
-    result = subprocess.run(["poetry", *args],
-                            cwd=base,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode == 0:
-        return result.stdout.decode()
-    return f"poetry failed with {result.returncode}: {result.stderr.decode() + result.stdout.decode()}"
 
 class ChatSession:
     transcript: list[dict]
@@ -118,13 +46,95 @@ class StatefulChat:
     """a chat session with a generative model that can invoke tools"""
     chat: ChatSession
     base_path: str
+    sh: shell.Shell
 
     def __init__(self, system_prompt: str, base_path: str):
         self.base_path = base_path
         dotenv.load_dotenv()
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         self.chat = ChatSession(client, system_prompt, self.base_path)
-    
+        self.sh = shell.Shell(self.base_path, shell.python_isolation)
+
+    def write_file(self, path: str, content: str):
+        """write content to a file"""
+        path = os.path.join(self.base_path, path)
+        basepath, _ = os.path.split(path)
+        if basepath and not os.path.exists(basepath):
+            os.makedirs(basepath)
+        previous = None
+        if os.path.exists(path):
+            previous = self.cat_file(path)
+        with open(path, "w") as file:
+            file.write(content)
+        if previous is None:
+            return f"created {path}"
+        else:
+            diff = difflib.unified_diff(
+                previous.split("\n"),
+                content.split("\n"),
+                fromfile="before",
+                tofile="after"
+            )
+            return f"updated {path}\nunified diff\n" + "\n".join(diff)
+        
+
+    def cat_file(self, path):
+        """read a file's content"""
+        path = os.path.join(self.base_path, path)
+        with open(path) as file:
+            return file.read()
+
+    def cat_files_of_type(self, suffix):
+        """read all files with a given suffix"""
+        result = ""
+        for root, _, files in os.walk(self.base_path):
+            for file in files:
+                if file.endswith(suffix):
+                    rel_path = os.path.relpath(os.path.join(root, file), self.base_path)
+                    result += f"#### {rel_path}\n"
+                    result += "```\n"
+                    result += self.cat_file(rel_path)
+                    result += "\n```\n\n"
+        return result
+
+    def file_metadata(self, path: str) -> str:
+        """returns the line count if the file is text, binary otherwise"""
+        try:
+            with open(path) as file:
+                return f"{len(file.readlines())} lines"
+        except UnicodeDecodeError:
+            return "binary"
+
+    def ls_tree(self):
+        """recursively depict the directory hierarchy as an outline
+        including line counts for all files"""
+        result = ""
+        for root, dirs, files in os.walk(self.base_path):
+            # ignore hidden directories
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            rel_path = os.path.relpath(root, self.base_path)
+            result += f"### {rel_path}\n"
+            for file in files:
+                full_path = os.path.join(root, file)
+                result += f"* {file} ({self.file_metadata(full_path)})\n"
+            result += "\n"
+        return result
+
+    def run_tests(self) -> str:
+        """run tests in the tests/ directory"""
+
+        result = self.sh.run("poetry run pytest")
+        if result.return_code == 0:
+            return "all tests passed"
+        return f"pytests failed with {result.return_code}: {result.output}"
+
+    def run_poetry(self, args: list[str]) -> str:
+        """run a poetry command"""
+        result = self.sh.run(f"poetry {' '.join(args)}")
+        if result.return_code == 0:
+            return result.output
+        return f"poetry failed with {result.return_code}: {result.output}"
+
     def evaluate_tools(self, message: str) -> str|None:
         """evaluate any tools in the message and return the result"""
         parser = detector.JSONMDParser()
@@ -134,16 +144,16 @@ class StatefulChat:
 
         def inner_write_file(**args):
             if active_code_block is None:
-                raise ValueError("there was code block immediately before this write_file command. I should try emitting the code block and then the write_file command")
-            return write_file(**args, content=active_code_block.code)
+                raise ValueError("there was no code block immediately before this write_file command. a code block must appear before the write_file command")
+            return self.write_file(**args, content=active_code_block.code)
         
         tools = {
-            "write_file": lambda **args: inner_write_file(**args, base=self.base_path),
-            "cat_file": lambda **args: cat_file(**args, base=self.base_path),
-            "cat_files_of_type": lambda **args: cat_files_of_type(**args, base=self.base_path),
-            "ls_tree": lambda **args: ls_tree(**args, base=self.base_path),
-            "check_tests": lambda **args: run_tests(**args, base=self.base_path),
-            "poetry": lambda **args: run_poetry(**args, base=self.base_path),
+            "write_file": lambda **args: inner_write_file(**args),
+            "cat_file": lambda **args: self.cat_file(**args),
+            "cat_files_of_type": lambda **args: self.cat_files_of_type(**args),
+            "ls_tree": lambda **args: self.ls_tree(**args),
+            "check_tests": lambda **args: self.run_tests(**args),
+            "poetry": lambda **args: self.run_poetry(**args),
         }
 
         observations = []
@@ -192,11 +202,10 @@ class StatefulChat:
             except Exception as exc:
                 observations.append(f"failed to invoke {name} with {element}: {exc}")
         
-        if active_code_block is not None:
-            observations.append("the final code block was not folloed by a write_file command")
+        # if active_code_block is not None:
+        #     observations.append("the final code block was not folloed by a write_file command")
 
         return "\n".join(f"OBSERVATION: {obs}\n" for obs in observations)
-
 
     async def interact(self, prompt: str) -> typing.Generator[str,str,None]:
         """send the next interaction to the model and yield the response.

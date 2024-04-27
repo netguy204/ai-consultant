@@ -1,10 +1,24 @@
 """tools for interacting with an isolated shell"""
 import dataclasses
 import re
+import os
 
 import pexpect
 
-IMAGE="python:3.11.9-slim-bullseye"
+@dataclasses.dataclass
+class ShellEnvironment:
+    """a shell environment"""
+    image: str
+    sentinal: str
+    init: str
+
+python_isolation = ShellEnvironment(
+    image="python_isolation",
+    sentinal="MySentinalPrompt>",
+    init="poetry shell && poetry install",
+)
+
+IMAGE="python_isolation"#"python:3.11.9-slim-bullseye"
 SENTINAL="MySentinalPrompt>"
 DOCKER="/usr/local/bin/docker"
 
@@ -18,9 +32,12 @@ class ShellResponse:
 class Shell:
     """a shell session"""
     shell: pexpect.spawn
+    env: ShellEnvironment
 
-    def __init__(self):
-        self.shell = pexpect.spawn(f"{DOCKER} run -it {IMAGE} /bin/bash -l")
+    def __init__(self, cwd: str, env: ShellEnvironment):
+        self.env = env
+        cwd = os.path.abspath(cwd)
+        self.shell = pexpect.spawn(f"{DOCKER} run -v {cwd}:/app -it {env.image} /bin/bash -l")
         result = self.shell.expect([":/#", pexpect.EOF, pexpect.TIMEOUT], timeout=120)
         if result == 1:
             output = self.shell.before.decode()
@@ -32,7 +49,9 @@ class Shell:
         self.shell.expect(SENTINAL)
         self.shell.expect(SENTINAL)
 
-        # healthy shell
+        self.run("cd /app")
+        #self.run("poetry shell")
+        self.run("poetry install")
 
     def _run_echo(self, line: str, timeout) -> str:
         ansi_escape = re.compile(r'''
